@@ -10,11 +10,13 @@
 
 - 🌏 **真实地图** - 基于 OpenStreetMap 数据，不穿墙不穿海
 - 🚶 **真实路线** - 使用 OSRM 步行导航，获取实际道路几何
+- 🇨🇳 **国内适配** - OSM 加载失败自动切换高德地图（国内秒开）
 - 🖥️ **横向全屏** - 横向全屏布局，电脑和手机都完美展示
 - 🎨 **自定义主题** - 一行命令切换任意主题色（支持国家/城市主题色）
 - 🌦️ **天气查询** - 自动查终点城市当前天气（wttr.in 免费，无需 API Key）
 - 🌐 **双语界面** - 支持中文 / English 切换
-- ⚡ **零依赖** - 纯 Python 标准库 + curl，无需 pip install
+- 🖼️ **离线渲染** - `render.py` 纯 Python 生成路线图图片（无需浏览器）
+- ⚡ **零依赖** - generate.py 仅需 Python 标准库 + curl，无需 pip install
 
 ---
 
@@ -95,6 +97,24 @@ python3 -m http.server 18767 --directory /tmp &
 # 5. 停掉 server
 pkill -f "http.server 18767"
 ```
+
+### 🖼️ 离线渲染（无需浏览器）
+
+直接生成 PNG 图片，使用高德地图底图（国内可访问）：
+
+```bash
+# 需要 Pillow: pip install Pillow requests
+python3 scripts/render.py \
+  --accent "#228B22" \
+  --zoom 13 \
+  output.png \
+  /tmp/citywalk_map.html
+```
+
+常用参数：
+- `--accent #hex` 主题色
+- `--zoom 13` 缩放级别（数字越大越清晰，但 tile 越多）
+- `--help` 查看完整帮助
 
 ---
 
