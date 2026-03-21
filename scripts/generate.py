@@ -372,17 +372,42 @@ body {{
 var waypoints = {waypoints_json};
 var routeCoords = {route_json};
 var map = L.map('map', {{zoomControl:true, scrollWheelZoom:false}}).setView([{center_lat},{center_lon}], 14);
-var tileLayer = L.tileLayer("{tile_url}", {{maxZoom:19, attribution:"{tile_attrib}", errorTileUrl:"https://unpkg.com/leaflet@1.9.4/dist/images/tile_404.png"}});
+
+// 多源瓦片：优先 OSM，5秒内失败则切换高德（国内可访问）
+var osmUrl = "https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png";
+var gaodeUrl = "https://wprd01.is.autonavi.com/appmaptile?x={{x}}&y={{y}}&z={{z}}&lang=zh_cn&size=1&style=7";
+var tileLayer = L.tileLayer(osmUrl, {{maxZoom:19, attribution:"© OpenStreetMap contributors", subdomains:'abc', errorTileUrl:'https://unpkg.com/leaflet@1.9.4/dist/images/tile_404.png'}});
+var osmFailed = false;
+
 tileLayer.on('tileerror', function(e) {{
-  document.getElementById('map').innerHTML = '<div style="padding:40px;text-align:center;color:#888;font-size:14px;">🗺️ 地图瓦片加载失败<br><small>可能是网络问题，请检查代理设置或使用 --tile-url 指定可用图源</small></div>';
+  if (osmFailed) return;
+  osmFailed = true;
+  console.log('OSM tiles failed, switching to 高德...');
+  map.removeLayer(tileLayer);
+  var gaodeLayer = L.tileLayer(gaodeUrl, {{maxZoom:18, attribution:"© 高德地图 | © OpenStreetMap contributors"}});
+  gaodeLayer.addTo(map);
 }});
-// 主动检测：瓦片 403/404 时 3 秒后显示友好提示
+
+// 超时回退：OSM 5秒内没成功全部加载则切高德
+var loadedCount = 0;
+var requiredTiles = 6;
 setTimeout(function() {{
-  var firstTile = document.querySelector('#map img');
-  if (!firstTile || firstTile.naturalWidth === 0 || firstTile.src.includes('tile_404')) {{
-    document.getElementById('map').innerHTML = '<div style="padding:40px;text-align:center;color:#888;font-size:14px;">🗺️ 地图瓦片加载失败（OSM 在部分地区需代理）<br><small>可使用 --tile-url 参数指定可用图源，或配置代理/VPN</small></div>';
+  if (loadedCount < requiredTiles && !osmFailed) {{
+    osmFailed = true;
+    console.log('OSM loading slow, switching to 高德...');
+    try {{ map.removeLayer(tileLayer); }} catch(e) {{}}
+    var gaodeLayer = L.tileLayer(gaodeUrl, {{maxZoom:18, attribution:"© 高德地图 | © OpenStreetMap contributors"}});
+    gaodeLayer.addTo(map);
   }}
-}}, 3000);
+}}, 5000);
+
+// OSM 加载计数
+map.eachLayer(function(l) {{
+  if (l instanceof L.TileLayer) {{
+    l.on('load', function() {{ loadedCount++; }});
+  }}
+}});
+
 tileLayer.addTo(map);
 L.polyline(routeCoords, {{color:'{accent}', weight:5, opacity:0.85, dashArray:'10, 5'}}).addTo(map);
 var ds = Math.max(1, Math.floor(routeCoords.length/12));
