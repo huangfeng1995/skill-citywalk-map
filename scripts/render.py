@@ -80,14 +80,16 @@ def darken_rgb(rgb, factor=0.72):
 # ── Tile 下载─────────────────────────────────────────────────────────────────
 
 def get_tile(tx, ty, zoom, retries=3):
-    # 高德地图瓦片（国内可访问）
-    url = f"https://wprd01.is.autonavi.com/appmaptile?x={tx}&y={ty}&z={zoom}&lang=zh_cn&size=1&style=7"
-    headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)'}
+    # OSM 法国节点（图块数据质量高、国外覆盖好）
+    url = f"https://a.tile.openstreetmap.fr/osmfr/{zoom}/{tx}/{ty}.png"
     for i in range(retries):
         try:
-            r = requests.get(url, headers=headers, timeout=15)
-            if r.status_code == 200 and len(r.content) > 1000 and r.content[:4] == b'\x89PNG':
-                return Image.open(io.BytesIO(r.content))
+            r = requests.get(url, headers={'User-Agent': 'CitywalkMapRenderer/3.0'}, timeout=15)
+            if r.status_code == 200 and len(r.content) > 5000 and r.content[:4] == b'\x89PNG':
+                img = Image.open(io.BytesIO(r.content))
+                if img.mode == 'P':
+                    img = img.convert('RGB')
+                return img
             time.sleep(1)
         except Exception:
             if i < retries - 1:
@@ -100,15 +102,8 @@ def render_full_card(waypoints, route_coords, title, subtitle, dist, dur, walk,
                      tips, accent, output, zoom=DEFAULT_ZOOM):
     """渲染完整路线图卡片（地图+统计+景点+贴士）"""
 
-    # ── WGS84 → GCJ-02（高德坐标），确保底图和标记完全对齐 ──────────────
-    waypoints_gcj = []
-    for wp in waypoints:
-        g_lat, g_lon = wgs84_to_gcj02(wp['lat'], wp['lon'])
-        waypoints_gcj.append({**wp, 'lat': g_lat, 'lon': g_lon})
-    route_gcj = [wgs84_to_gcj02(c[0], c[1]) for c in route_coords]
-
     # ── 底图 ────────────────────────────────────────────────────────────────
-    all_c = route_gcj + [[w['lat'], w['lon']] for w in waypoints_gcj]
+    all_c = route_coords + [[w['lat'], w['lon']] for w in waypoints]
     lats = [c[0] for c in all_c]
     lons = [c[1] for c in all_c]
     pad = 0.008
@@ -132,21 +127,20 @@ def render_full_card(waypoints, route_coords, title, subtitle, dist, dur, walk,
         print(f"  下载进度 {pct}%...", end='\r')
     print(f"  底图完成 ({total}张)")
 
-    # 画路线（使用 GCJ-02 坐标，与高德底图对齐）
+    # 画路线
     draw = ImageDraw.Draw(base)
-    pts = [deg2px(c[0], c[1], zoom, tx_min, ty_min) for c in route_gcj]
+    pts = [deg2px(c[0], c[1], zoom, tx_min, ty_min) for c in route_coords]
     if len(pts) > 1:
         draw.line(pts, fill=accent_to_rgb(accent), width=5)
 
-    # 画站点（使用 GCJ-02 坐标）
-    for i, wp in enumerate(waypoints_gcj):
+    # 画站点
+    for i, wp in enumerate(waypoints):
         px, py = deg2px(wp['lat'], wp['lon'], zoom, tx_min, ty_min)
         col = (accent_to_rgb(accent) if i == 0
-               else (34, 197, 94) if i == len(waypoints_gcj) - 1
+               else (34, 197, 94) if i == len(waypoints) - 1
                else (255, 159, 67))
         r = 12
         draw.ellipse([px - r, py - r, px + r, py + r], fill=col, outline='white', width=3)
-        # 标签背景
         name = wp['name']
         draw.text((px + 16, py - 9), name, fill=(30, 30, 30))
 
