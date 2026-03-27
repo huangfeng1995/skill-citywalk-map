@@ -234,7 +234,177 @@ if args.weather:
 print(f"正在查询 OSRM 步行路由 ({len(waypoints)} 个站点)...")
 td, walk_sec, route_coords = get_osrm_route(waypoints)
 
+
+
+# ── 高德瓦片下载 & PIL 路线底图 ─────────────────────────────────────────────
+def _lat_lon_to_tile(lat, lon, zoom):
+    import math
+    lat_rad = math.radians(lat)
+    n = 2.0 ** zoom
+    x = int((lon + 180.0) / 360.0 * n)
+    y = int((1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n)
+    return x, y
+
+def _download_tile(x, y, zoom, try_osm=True):
+    """下载瓦片：高德优先（>1KB有效），OSM备选。返回 PIL Image 或 None"""
+    import subprocess, os
+    from PIL import Image
+
+    def _try_url(url, path):
+        if os.path.exists(path):
+            try:
+                img = Image.open(path)
+                img.verify()
+                if os.path.getsize(path) > 1000:  # 有效瓦片 > 1KB
+                    return Image.open(path)
+            except:
+                pass
+        cmd = ['curl', '-s', '--max-time', '5', '--connect-timeout', '3',
+               url, '-o', path]
+        try:
+            subprocess.run(cmd, timeout=8)
+            if os.path.exists(path) and os.path.getsize(path) > 1000:
+                return Image.open(path)
+        except:
+            pass
+        return None
+
+    # 高德瓦片
+    gaode_url = (f"https://wprd01.is.autonavi.com/appmaptile"
+                 f"?x={x}&y={y}&z={zoom}&lang=zh_cn&size=1&style=7")
+    tile_path = f'/tmp/tile_{zoom}_{x}_{y}.png'
+    img = _try_url(gaode_url, tile_path)
+    if img:
+        return img
+
+    # OSM 备选
+    if try_osm:
+        osm_url = f"https://tile.openstreetmap.org/{zoom}/{x}/{y}.png"
+        osm_path = f'/tmp/osmtile_{zoom}_{x}_{y}.png'
+        img = _try_url(osm_url, osm_path)
+        if img:
+            return img
+    return None
+
+def _generate_pil_base(route_coords, waypoints_data, accent_color, output_path,
+                        img_w=1024, img_h=600):
+    """生成带高德瓦片背景的路线底图（降级到纯路线网格图）"""
+    from PIL import Image, ImageDraw, ImageFont
+    import math
+
+    def hex_to_rgb(h):
+        h = h.lstrip('#')
+        return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+
+    rgb = hex_to_rgb(accent_color)
+    light_bg = (250, 248, 245)
+    grid_color = (220, 217, 210)
+    marker_main = rgb
+    marker_mid = (255, 159, 67)
+    marker_end = (16, 185, 129)
+
+    if not route_coords:
+        img = Image.new('RGB', (img_w, img_h), light_bg)
+        img.save(output_path, 'PNG', quality=100)
+        return
+
+    # 只对站点做 padding，避免路线跨度大导致瓦片爆炸
+    wp_lats = [w['lat'] for w in waypoints_data]
+    wp_lons = [w['lon'] for w in waypoints_data]
+    wp_pad = 0.02
+    min_lat = min(wp_lats) - wp_pad
+    max_lat = max(wp_lats) + wp_pad
+    min_lon = min(wp_lons) - wp_pad
+    max_lon = max(wp_lons) + wp_pad
+
+    def to_px(lat, lon):
+        x = int((lon - min_lon) / (max_lon - min_lon) * img_w)
+        y = int((max_lat - lat) / (max_lat - min_lat) * img_h)
+        return x, y
+
+    # 尝试低zoom级别瓦片
+    img = None
+    for zoom in [12, 13, 14]:
+        tx_min, ty_max = _lat_lon_to_tile(min_lat, min_lon, zoom)
+        tx_max, ty_min = _lat_lon_to_tile(max_lat, max_lon, zoom)
+        ntx = tx_max - tx_min + 1
+        nty = ty_max - ty_min + 1
+        if ntx <= 4 and nty <= 4:
+            print(f"  正在下载 {ntx}x{nty} 张高德瓦片 (zoom={zoom})...")
+            canvas_w = ntx * 256
+            canvas_h = nty * 256
+            canvas = Image.new('RGB', (canvas_w, canvas_h), (240, 238, 235))
+            ok_count = 0
+            for tx in range(tx_min, tx_max + 1):
+                for ty in range(ty_min, ty_max + 1):
+                    t = _download_tile(tx, ty, zoom)
+                    if t:
+                        canvas.paste(t.resize((256, 256), Image.LANCZOS),
+                                     ((tx-tx_min)*256, (ty-ty_min)*256))
+                        ok_count += 1
+            if ok_count >= ntx * nty * 0.5:
+                print(f"  成功拼贴 {ok_count}/{ntx*nty} 张瓦片")
+                canvas = canvas.resize((img_w, img_h), Image.LANCZOS)
+                img = canvas
+            break
+
+    # 降级：纯路线网格
+    if img is None:
+        img = Image.new('RGB', (img_w, img_h), light_bg)
+        dg = ImageDraw.Draw(img)
+        for x in range(0, img_w, 50):
+            dg.line([(x, 0), (x, img_h)], grid_color, 1)
+        for y in range(0, img_h, 50):
+            dg.line([(0, y), (img_w, y)], grid_color, 1)
+
+    d = ImageDraw.Draw(img)
+
+    poly_pts = [to_px(c[0], c[1]) for c in route_coords]
+    seen = set(); clean_pts = []
+    for p in poly_pts:
+        if tuple(p) not in seen:
+            seen.add(tuple(p)); clean_pts.append(p)
+    poly_pts = clean_pts
+
+    for i in range(len(poly_pts) - 1):
+        d.line([poly_pts[i], poly_pts[i+1]], (255, 255, 255), 7)
+    for i in range(len(poly_pts) - 1):
+        d.line([poly_pts[i], poly_pts[i+1]], rgb, 4)
+
+    step = max(1, len(poly_pts) // 20)
+    for i in range(0, len(poly_pts) - 1, step):
+        x, y = poly_pts[i]
+        d.ellipse([x-3, y-3, x+3, y+3], fill=rgb)
+
+    try:
+        fnt = ImageFont.truetype('/System/Library/Fonts/Helvetica.ttc', 12)
+    except:
+        fnt = ImageFont.load_default()
+
+    for i, wp in enumerate(waypoints_data):
+        px, py = to_px(wp['lat'], wp['lon'])
+        color = marker_main if i == 0 else (marker_end if i == len(waypoints_data)-1 else marker_mid)
+        d.ellipse([px-12, py-12, px+12, py+12], fill='white')
+        d.ellipse([px-9, py-9, px+9, py+9], fill=color)
+        bbox = d.textbbox((0, 0), wp['num'], font=fnt)
+        tw = bbox[2]-bbox[0]; th = bbox[3]-bbox[1]
+        d.text((px - tw//2, py - th//2 - 1), wp['num'], fill='white', font=fnt)
+
+    img.save(output_path, 'PNG', quality=100)
+    print(f"  路线底图已生成: {output_path}")
+
+
 visit_sec = len(waypoints) * args.visit_time * 60
+
+route_base_path = '/tmp/citywalk_route_base.png'
+_generate_pil_base(route_coords, waypoints, ACCENT, route_base_path)
+import base64 as _b64
+with open(route_base_path, 'rb') as _f:
+    PIL_BASE64 = 'data:image/png;base64,' + _b64.b64encode(_f.read()).decode()
+# 读取 PIL 图片并转为 base64（嵌入 HTML，无外部依赖）
+import base64
+with open(route_base_path, 'rb') as f:
+    PIL_BASE64 = 'data:image/png;base64,' + base64.b64encode(f.read()).decode()
 total_sec = walk_sec + visit_sec
 
 # ── Build HTML ────────────────────────────────────────────────────────────────
@@ -245,14 +415,29 @@ for i, w in enumerate(waypoints):
     route_html_lines.append(f'          <li><span class="route-num {cls}">{w["num"]}</span>{w["name"]}</li>')
 route_html = '\n'.join(route_html_lines)
 
-TIPS = {
-    'zh': ['建议提前出发，合理安排时间', '穿着舒适的步行鞋', '携带水瓶和防晒用品', '注意安全，遵守当地规定'],
-    'en': ['Start early and plan your time well', 'Wear comfortable walking shoes',
-           'Bring water and sun protection', 'Stay safe and follow local rules'],
-}
-tips_list = [] if args.no_tips else TIPS.get(args.lang, TIPS['zh'])
-if weather_info:
-    tips_list.insert(0, f"📍 终点天气: {weather_info}")
+def get_dynamic_tips(td, walk_sec, total_sec, n_stops, weather_info, lang, no_tips):
+    km = td / 1000
+    tips = [] if no_tips else []
+    if lang == 'zh':
+        if km > 8: tips.append('🚶 路程较长（>8km），量力而行，累了就找咖啡馆歇脚')
+        elif km > 4: tips.append('🥾 中等距离路线，记得带足饮用水')
+        if n_stops >= 6: tips.append('📸 站点较多，每站拍张照，方便回看路线')
+        if n_stops >= 4: tips.append('🗺️ 途经多个景点，建议按顺序游览，避免折返')
+        if weather_info: tips.append(f'⛅ {weather_info}')
+        if walk_sec > 3600: tips.append('⏱️ 纯步行超过1小时，每隔20分钟小憩一下')
+        if km < 2: tips.append('🏃 短途路线，轻松漫步即可')
+        if n_stops <= 2: tips.append('🎯 精简路线，专注体验每个站点')
+        tips.extend(['📱 留意手机电量，🔋 建议带充电宝'])
+    else:
+        if km > 8: tips.append('🚶 Long route (>8km), pace yourself')
+        elif km > 4: tips.append('🥾 Pack enough water')
+        if n_stops >= 6: tips.append('📸 Photograph each stop')
+        if weather_info: tips.append(f'⛅ {weather_info}')
+        if walk_sec > 3600: tips.append('⏱️ Over 1h walking — rest every 20min')
+        tips.extend(['📱 Keep phone charged', '🔋 Bring a charger'])
+    return tips
+
+tips_list = get_dynamic_tips(td, walk_sec, total_sec, len(waypoints), weather_info, args.lang, args.no_tips)
 tips_html = '\n'.join(f'          <li>{t}</li>' for t in tips_list)
 
 stats_extra = ''
@@ -409,6 +594,21 @@ map.eachLayer(function(l) {{
 }});
 
 tileLayer.addTo(map);
+
+// 5秒后若瓦片不足则显示PIL预渲染底图
+setTimeout(function() {{
+  var loaded = 0;
+  if (typeof tileLayer !== 'undefined') {{
+    tileLayer.eachTile(function() {{ loaded++; }});
+  }}
+  if (loaded < 3 && !window._pilFallbackShown) {{
+    window._pilFallbackShown = true;
+    var bounds = map.getBounds();
+    var pilDataUrl = '{pil_base64}';
+    var pil = L.imageOverlay(pilDataUrl, bounds, {{opacity: 1}});
+    pil.addTo(map);
+  }}
+}}, 5000);
 L.polyline(routeCoords, {{color:'{accent}', weight:5, opacity:0.85, dashArray:'10, 5'}}).addTo(map);
 var ds = Math.max(1, Math.floor(routeCoords.length/12));
 for(var i=0;i<routeCoords.length-1;i+=ds){{
@@ -469,6 +669,7 @@ html = HTML.format(
     stats_extra=stats_extra,
     tile_url=args.tile_url or 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
     tile_attrib=args.tile_attrib.replace("'", "\\'"),
+    pil_base64=PIL_BASE64,
     **lang_str,
 )
 

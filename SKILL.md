@@ -63,11 +63,33 @@ python3 skills/citywalk-map/scripts/generate.py \
 
 ### 截图流程 | Screenshot
 
+生成后需要截图发给用户（飞书/Discord）。按以下步骤操作：
+
+**Step 1：启动 HTTP 服务器**
 ```bash
 python3 -m http.server 18767 --directory /tmp &
-# 等待 20 秒 → browser screenshot → 飞书发送
+sleep 2
+```
+
+**Step 2：打开页面 + 等待瓦片加载 + 截图**
+```
+browser → open: http://localhost:18767/citywalk_map.html
+browser → act: evaluate {await new Promise(r => setTimeout(r, 8000)); return true}
+browser → act: resize {width:1280, height:900}
+browser → screenshot → 保存截图
+```
+
+**Step 3：发送并清理**
+```
+message → send: {media: /tmp/citywalk_map.png 或截图文件}
 pkill -f "http.server 18767"
 ```
+
+**⚠️ 关键点：必须等待 8 秒让瓦片加载，且要 resize 后再截图**
+
+### 输出路径
+- HTML：`/tmp/citywalk_map.html`
+- 截图：浏览器截图工具直接输出（无需手动保存）
 
 ---
 
@@ -102,3 +124,12 @@ skills/citywalk-map/
 ## 开源许可 | License
 
 MIT License
+
+---
+
+## 更新记录
+
+### 2026-03-27
+- 🗺️ **PIL 底图升级**：直接下载并拼接高德瓦片（curl 可达），生成真实地图背景的路线图；高德无效时自动尝试 OSM；均失败时降级到网格背景
+- 📝 **贴士动态化**：根据路线距离、站点数、天气等特征动态生成实用贴士，不再是千篇一律的固定内容
+- 🐛 修复：`route_color + (180,)` RGBA 元组在 RGB 图像上的兼容性；去重路线坐标防止零长度线段
